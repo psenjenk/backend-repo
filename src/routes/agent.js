@@ -1,63 +1,135 @@
 import express from 'express';
-import db from '../config/db.js';
-import { authenticate } from '../middleware/auth.js';
+import { authenticate, isAgent } from '../middleware/auth.js';
+import { transferFunds, getTransactionHistory } from '../controllers/transactionController.js';
+import User from '../models/user.js';
 
 const router = express.Router();
 
-// Transfer funds from agent to client
-router.post('/transfer', authenticate, async (req, res) => {
-  const { recipient_phone, amount } = req.body;
-  const senderId = req.user.id;
+// Apply authentication middleware to all routes
+router.use(authenticate);
+router.use(isAgent);
 
-  if (req.user.role !== 'agent') {
-    return res.status(403).json({ error: "Agents only" });
-  }
+/**
+ * @swagger
+ * /api/agent/transfer:
+ *   post:
+ *     summary: Transfer funds to another user
+ *     tags: [Agent]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - recipient_phone
+ *               - amount
+ *             properties:
+ *               recipient_phone:
+ *                 type: string
+ *                 format: phone
+ *                 example: "+1234567890"
+ *               amount:
+ *                 type: number
+ *                 minimum: 0
+ *                 example: 100.00
+ *     responses:
+ *       200:
+ *         description: Transfer successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 transaction_id:
+ *                   type: string
+ *                 new_balance:
+ *                   type: number
+ *       400:
+ *         description: Invalid amount or insufficient funds
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Agent access required
+ *       404:
+ *         description: Recipient not found
+ */
+router.post('/transfer', transferFunds);
 
+/**
+ * @swagger
+ * /api/agent/transactions:
+ *   get:
+ *     summary: Get transaction history
+ *     tags: [Agent]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of transactions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   id:
+ *                     type: string
+ *                   type:
+ *                     type: string
+ *                   amount:
+ *                     type: number
+ *                   status:
+ *                     type: string
+ *                   created_at:
+ *                     type: string
+ *                     format: date-time
+ *                   sender_phone:
+ *                     type: string
+ *                   receiver_phone:
+ *                     type: string
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Agent access required
+ */
+router.get('/transactions', getTransactionHistory);
+
+/**
+ * @swagger
+ * /api/agent/balance:
+ *   get:
+ *     summary: Get current balance
+ *     tags: [Agent]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Current balance
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 balance:
+ *                   type: number
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Agent access required
+ */
+router.get('/balance', async (req, res) => {
   try {
-    await db.query('BEGIN');
-
-    // 1. Check sender balance
-    const sender = await db.query(
-      'SELECT balance FROM users WHERE id = $1 FOR UPDATE',
-      [senderId]
-    );
-    if (sender.rows[0].balance < amount) {
-      await db.query('ROLLBACK');
-      return res.status(400).json({ error: "Insufficient balance" });
-    }
-
-    // 2. Find recipient by phone
-    const recipient = await db.query(
-      'SELECT id FROM users WHERE phone_number = $1',
-      [recipient_phone]
-    );
-    if (!recipient.rows[0]) {
-      await db.query('ROLLBACK');
-      return res.status(404).json({ error: "Recipient not found" });
-    }
-
-    // 3. Update balances
-    await db.query(
-      'UPDATE users SET balance = balance - $1 WHERE id = $2',
-      [amount, senderId]
-    );
-    await db.query(
-      'UPDATE users SET balance = balance + $1 WHERE id = $2',
-      [amount, recipient.rows[0].id]
-    );
-
-    // 4. Log transaction
-    await db.query(
-      `INSERT INTO ledger (type, sender_id, receiver_id, amount, status)
-       VALUES ('transfer', $1, $2, $3, 'completed')`,
-      [senderId, recipient.rows[0].id, amount]
-    );
-
-    await db.query('COMMIT');
-    res.json({ success: true });
+    const balance = await User.getBalance(req.user.id);
+    res.json({ balance });
   } catch (error) {
-    await db.query('ROLLBACK');
-    res.status(500).json({ error: "Transfer failed" });
+    console.error('Balance check error:', error);
+    res.status(500).json({ error: 'Failed to fetch balance' });
   }
 });
 
